@@ -6,6 +6,7 @@ import com.digitalpetri.enip.cip.services.CipService;
 import com.digitalpetri.enip.cip.structs.MessageRouterRequest;
 import com.digitalpetri.enip.cip.structs.MessageRouterResponse;
 import io.netty.buffer.ByteBuf;
+import io.netty.util.ReferenceCountUtil;
 
 public class ReadModifyWriteTagService implements CipService<Void> {
 
@@ -26,9 +27,9 @@ public class ReadModifyWriteTagService implements CipService<Void> {
     @Override
     public void encodeRequest(ByteBuf buffer) {
         MessageRouterRequest request = new MessageRouterRequest(
-                SERVICE_CODE,
-                requestPath,
-                this::encode
+            SERVICE_CODE,
+            requestPath,
+            this::encode
         );
 
         MessageRouterRequest.encode(request, buffer);
@@ -40,10 +41,14 @@ public class ReadModifyWriteTagService implements CipService<Void> {
 
         int generalStatus = response.getGeneralStatus();
 
-        if (generalStatus == 0x00) {
-            return null;
-        } else {
-            throw new CipResponseException(generalStatus, response.getAdditionalStatus());
+        try {
+            if (generalStatus == 0x00) {
+                return null;
+            } else {
+                throw new CipResponseException(generalStatus, response.getAdditionalStatus());
+            }
+        } finally {
+            ReferenceCountUtil.release(response.getData());
         }
     }
 

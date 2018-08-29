@@ -42,9 +42,9 @@ public class ReadTagService implements CipService<ByteBuf> {
     @Override
     public void encodeRequest(ByteBuf buffer) {
         MessageRouterRequest request = new MessageRouterRequest(
-                SERVICE_CODE,
-                requestPath,
-                dataEncoder
+            SERVICE_CODE,
+            requestPath,
+            dataEncoder
         );
 
         MessageRouterRequest.encode(request, buffer);
@@ -56,14 +56,14 @@ public class ReadTagService implements CipService<ByteBuf> {
 
         int generalStatus = response.getGeneralStatus();
 
-        if (generalStatus == 0x00) {
-            try {
+        try {
+            if (generalStatus == 0x00) {
                 return decode(response);
-            } finally {
-                ReferenceCountUtil.release(response);
+            } else {
+                throw new CipResponseException(generalStatus, response.getAdditionalStatus());
             }
-        } else {
-            throw new CipResponseException(generalStatus, response.getAdditionalStatus());
+        } finally {
+            ReferenceCountUtil.release(response.getData());
         }
     }
 
@@ -72,7 +72,7 @@ public class ReadTagService implements CipService<ByteBuf> {
     }
 
     private ByteBuf decode(MessageRouterResponse response) {
-        return response.getData();
+        return response.getData().retain();
     }
 
 }

@@ -7,6 +7,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
+import com.digitalpetri.enip.codec.EnipCodec;
 import com.digitalpetri.enip.commands.Command;
 import com.digitalpetri.enip.commands.CommandCode;
 import com.digitalpetri.enip.commands.ListIdentity;
@@ -15,6 +16,7 @@ import com.digitalpetri.enip.commands.SendUnitData;
 import com.digitalpetri.enip.cpf.ConnectedDataItemResponse;
 import com.digitalpetri.enip.cpf.CpfPacket;
 import com.digitalpetri.enip.cpf.UnconnectedDataItemResponse;
+import com.digitalpetri.enip.fsm.ChannelFsm;
 import com.google.common.collect.Maps;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.buffer.PooledByteBufAllocator;
@@ -31,6 +33,8 @@ import io.netty.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import static com.digitalpetri.enip.util.FutureUtils.complete;
+
 public class EtherNetIpClient {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
@@ -42,8 +46,7 @@ public class EtherNetIpClient {
 
     private volatile long sessionHandle;
 
-    private final ChannelManager channelManager;
-
+    private final ChannelFsm channelFsm;
     private final EtherNetIpClientConfig config;
 
     public EtherNetIpClient(EtherNetIpClientConfig config) {
@@ -51,28 +54,25 @@ public class EtherNetIpClient {
 
         executor = config.getExecutor();
 
-        channelManager = new ChannelManager(this);
+        channelFsm = ChannelFsm.newChannelFsm(this);
     }
 
     public CompletableFuture<EtherNetIpClient> connect() {
-        CompletableFuture<EtherNetIpClient> future = new CompletableFuture<>();
-
-        channelManager.getChannel().whenComplete((ch, ex) -> {
-            if (ch != null) future.complete(EtherNetIpClient.this);
-            else future.completeExceptionally(ex);
-        });
-
-        return future;
+        return complete(new CompletableFuture<EtherNetIpClient>()).with(
+            channelFsm.connect()
+                .thenApply(c -> EtherNetIpClient.this)
+        );
     }
 
     public CompletableFuture<EtherNetIpClient> disconnect() {
-        channelManager.disconnect();
-
-        return CompletableFuture.completedFuture(this);
+        return complete(new CompletableFuture<EtherNetIpClient>()).with(
+            channelFsm.disconnect()
+                .thenApply(c -> EtherNetIpClient.this)
+        );
     }
 
     public String getState() {
-        return channelManager.getState();
+        return channelFsm.getState();
     }
 
     public CompletableFuture<ListIdentity> listIdentity() {
@@ -86,19 +86,19 @@ public class EtherNetIpClient {
     public CompletableFuture<Void> sendUnitData(SendUnitData command) {
         CompletableFuture<Void> future = new CompletableFuture<>();
 
-        channelManager.getChannel().whenComplete((ch, ex) -> {
+        channelFsm.getChannel().whenComplete((ch, ex) -> {
             if (ch != null) {
                 EnipPacket packet = new EnipPacket(
-                        command.getCommandCode(),
-                        sessionHandle,
-                        EnipStatus.EIP_SUCCESS,
-                        0L,
-                        command
-                );
+                    command.getCommandCode(),
+                    sessionHandle,
+                    EnipStatus.EIP_SUCCESS,
+                    0L,
+                    command);
 
-                ch.writeAndFlush(packet, ch.voidPromise());
-
-                future.complete(null);
+                ch.writeAndFlush(packet).addListener(f -> {
+                    if (f.isSuccess()) future.complete(null);
+                    else future.completeExceptionally(f.cause());
+                });
             } else {
                 future.completeExceptionally(ex);
             }
@@ -115,10 +115,10 @@ public class EtherNetIpClient {
         return executor;
     }
 
-    protected <T extends Command> CompletableFuture<T> sendCommand(Command command) {
+    public <T extends Command> CompletableFuture<T> sendCommand(Command command) {
         CompletableFuture<T> future = new CompletableFuture<>();
 
-        channelManager.getChannel().whenComplete((ch, ex) -> {
+        channelFsm.getChannel().whenComplete((ch, ex) -> {
             if (ch != null) writeCommand(ch, command, future);
             else future.completeExceptionally(ex);
         });
@@ -126,16 +126,16 @@ public class EtherNetIpClient {
         return future;
     }
 
-    protected <T extends Command> void writeCommand(Channel channel,
-                                                    Command command,
-                                                    CompletableFuture<T> future) {
+    public <T extends Command> void writeCommand(Channel channel,
+                                                 Command command,
+                                                 CompletableFuture<T> future) {
 
         EnipPacket packet = new EnipPacket(
-                command.getCommandCode(),
-                sessionHandle,
-                EnipStatus.EIP_SUCCESS,
-                senderContext.getAndIncrement(),
-                command
+            command.getCommandCode(),
+            sessionHandle,
+            EnipStatus.EIP_SUCCESS,
+            senderContext.getAndIncrement(),
+            command
         );
 
         Timeout timeout = config.getWheelTimer().newTimeout(tt -> {
@@ -143,25 +143,36 @@ public class EtherNetIpClient {
             PendingRequest<?> p = pendingRequests.remove(packet.getSenderContext());
             if (p != null) {
                 String message = String.format("senderContext=%s timed out waiting %sms for response",
-                        packet.getSenderContext(), config.getTimeout().toMillis());
+                    packet.getSenderContext(), config.getTimeout().toMillis());
                 p.promise.completeExceptionally(new Exception(message));
             }
         }, config.getTimeout().toMillis(), TimeUnit.MILLISECONDS);
 
         pendingRequests.put(packet.getSenderContext(), new PendingRequest<>(future, timeout));
 
-        channel.writeAndFlush(packet, channel.voidPromise());
+        channel.writeAndFlush(packet).addListener(f -> {
+            if (!f.isSuccess()) {
+                PendingRequest pending = pendingRequests.remove(packet.getSenderContext());
+                if (pending != null) {
+                    pending.timeout.cancel();
+                    pending.promise.completeExceptionally(f.cause());
+                }
+            }
+        });
     }
 
     private void onChannelRead(EnipPacket packet) {
         CommandCode commandCode = packet.getCommandCode();
+        EnipStatus status = packet.getStatus();
 
         if (commandCode == CommandCode.SendUnitData) {
-            onUnitDataReceived((SendUnitData) packet.getCommand());
+            if (status == EnipStatus.EIP_SUCCESS) {
+                onUnitDataReceived((SendUnitData) packet.getCommand());
+            } else {
+                logger.warn("Received SendUnitData command with status: {}", status);
+            }
         } else {
             if (commandCode == CommandCode.RegisterSession) {
-                EnipStatus status = packet.getStatus();
-
                 if (status == EnipStatus.EIP_SUCCESS) {
                     sessionHandle = packet.getSessionHandle();
                 } else {
@@ -173,8 +184,6 @@ public class EtherNetIpClient {
 
             if (pending != null) {
                 pending.timeout.cancel();
-
-                EnipStatus status = packet.getStatus();
 
                 if (status == EnipStatus.EIP_SUCCESS) {
                     pending.promise.complete(packet.getCommand());
@@ -200,13 +209,15 @@ public class EtherNetIpClient {
     }
 
     private void onChannelInactive(ChannelHandlerContext ctx) {
-        logger.debug("onChannelInactive() {} <-> {}", ctx.channel().localAddress(), ctx.channel().remoteAddress());
-        channelManager.disconnect();
+        logger.debug("onChannelInactive() {} <-> {}",
+            ctx.channel().localAddress(), ctx.channel().remoteAddress());
     }
 
     private void onExceptionCaught(ChannelHandlerContext ctx, Throwable cause) {
-        logger.debug("onExceptionCaught() {} <-> {}", ctx.channel().localAddress(), ctx.channel().remoteAddress(), cause);
-        channelManager.disconnect();
+        logger.debug("onExceptionCaught() {} <-> {}",
+            ctx.channel().localAddress(), ctx.channel().remoteAddress(), cause);
+
+        ctx.channel().close();
     }
 
     /**
@@ -215,8 +226,7 @@ public class EtherNetIpClient {
      *
      * @param command the {@link com.digitalpetri.enip.commands.SendUnitData} command received.
      */
-    protected void onUnitDataReceived(SendUnitData command) {
-    }
+    protected void onUnitDataReceived(SendUnitData command) {}
 
     private static final class EtherNetIpClientHandler extends SimpleChannelInboundHandler<EnipPacket> {
 
@@ -231,18 +241,22 @@ public class EtherNetIpClient {
         }
 
         @Override
-        protected void channelRead0(ChannelHandlerContext channelHandlerContext, EnipPacket packet) throws Exception {
+        protected void channelRead0(ChannelHandlerContext channelHandlerContext, EnipPacket packet) {
             executor.execute(() -> client.onChannelRead(packet));
         }
 
         @Override
         public void channelInactive(ChannelHandlerContext ctx) throws Exception {
             client.onChannelInactive(ctx);
+
+            super.channelInactive(ctx);
         }
 
         @Override
         public void exceptionCaught(ChannelHandlerContext ctx, Throwable cause) throws Exception {
             client.onExceptionCaught(ctx, cause);
+
+            super.exceptionCaught(ctx, cause);
         }
 
     }
@@ -254,28 +268,28 @@ public class EtherNetIpClient {
         Bootstrap bootstrap = new Bootstrap();
 
         bootstrap.group(config.getEventLoop())
-                .channel(NioSocketChannel.class)
-                .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
-                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) config.getTimeout().toMillis())
-                .option(ChannelOption.TCP_NODELAY, true)
-                .handler(new ChannelInitializer<SocketChannel>() {
-                    @Override
-                    protected void initChannel(SocketChannel ch) throws Exception {
-                        ch.pipeline().addLast(new EnipCodec());
-                        ch.pipeline().addLast(new EtherNetIpClientHandler(client));
-                    }
-                });
+            .channel(NioSocketChannel.class)
+            .option(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, (int) config.getTimeout().toMillis())
+            .option(ChannelOption.TCP_NODELAY, true)
+            .handler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    ch.pipeline().addLast(new EnipCodec());
+                    ch.pipeline().addLast(new EtherNetIpClientHandler(client));
+                }
+            });
 
         config.getBootstrapConsumer().accept(bootstrap);
 
         bootstrap.connect(config.getHostname(), config.getPort())
-                .addListener((ChannelFuture f) -> {
-                    if (f.isSuccess()) {
-                        future.complete(f.channel());
-                    } else {
-                        future.completeExceptionally(f.cause());
-                    }
-                });
+            .addListener((ChannelFuture f) -> {
+                if (f.isSuccess()) {
+                    future.complete(f.channel());
+                } else {
+                    future.completeExceptionally(f.cause());
+                }
+            });
 
 
         return future;

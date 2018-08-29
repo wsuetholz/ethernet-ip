@@ -1,4 +1,7 @@
 # EtherNet/IP Client
+[![Build status](https://travis-ci.org/digitalpetri/ethernet-ip.svg?branch=master)](https://travis-ci.org/digitalpetri/ethernet-ip)
+[![Maven Central](https://img.shields.io/maven-central/v/com.digitalpetri.enip/enip.svg)](https://search.maven.org/#search%7Cgav%7C1%7Cg%3A%22com.digitalpetri.enip%22%20AND%20a%3A%22enip%22)
+
 Asynchronous, non-blocking, EtherNet/IP client implementation for Java
 
 # Maven
@@ -7,7 +10,7 @@ Asynchronous, non-blocking, EtherNet/IP client implementation for Java
 <dependency>
     <groupId>com.digitalpetri.enip</groupId>
     <artifactId>enip-client</artifactId>
-    <version>1.0.1</version>
+    <version>1.1.2</version>
 </dependency>
 ```
 
@@ -21,6 +24,8 @@ EtherNetIpClientConfig config = EtherNetIpClientConfig.builder("10.20.4.57")
         .build();
 
 EtherNetIpClient client = new EtherNetIpClient(config);
+
+client.connect().get();
 
 client.listIdentity().whenComplete((li, ex) -> {
     if (li != null) {
@@ -47,6 +52,8 @@ PaddedEPath connectionPath = new PaddedEPath(
         new PortSegment(1, new byte[]{(byte) 0}));
 
 CipClient client = new CipClient(config, connectionPath);
+
+client.connect().get();
 
 GetAttributeListService service = new GetAttributeListService(
         new PaddedEPath(new ClassId(0x01), new InstanceId(0x01)),
@@ -76,3 +83,9 @@ client.invokeUnconnected(service).whenComplete((as, ex) -> {
 #### Logix Example
 
 [See the logix-services README!](logix-services/README.md)
+
+
+License
+--------
+
+Apache License, Version 2.0

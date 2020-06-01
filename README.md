@@ -6,11 +6,21 @@ Asynchronous, non-blocking, EtherNet/IP client implementation for Java
 
 # Maven
 
+## EtherNet/IP Client
 ```xml
 <dependency>
     <groupId>com.digitalpetri.enip</groupId>
     <artifactId>enip-client</artifactId>
-    <version>1.1.2</version>
+    <version>1.3.2</version>
+</dependency>
+```
+
+## CIP Client
+```xml
+<dependency>
+    <groupId>com.digitalpetri.enip</groupId>
+    <artifactId>cip-client</artifactId>
+    <version>1.3.2</version>
 </dependency>
 ```
 
@@ -38,6 +48,11 @@ client.listIdentity().whenComplete((li, ex) -> {
         ex.printStackTrace();
     }
 });
+
+client.disconnect.get();
+
+// Call this before application / JVM shutdown
+EtherNetIpShared.releaseSharedResources();
 ```
 #### CIP Service Example
 ```java
@@ -78,6 +93,11 @@ client.invokeUnconnected(service).whenComplete((as, ex) -> {
         ex.printStackTrace();
     }
 });
+
+client.disconnect.get();
+
+// Call this before application / JVM shutdown
+EtherNetIpShared.releaseSharedResources();
 ```
 
 #### Logix Example

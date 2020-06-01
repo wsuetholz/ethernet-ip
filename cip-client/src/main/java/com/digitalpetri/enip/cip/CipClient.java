@@ -4,7 +4,10 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
@@ -24,23 +27,22 @@ import com.digitalpetri.enip.cpf.CpfPacket;
 import com.digitalpetri.enip.cpf.NullAddressItem;
 import com.digitalpetri.enip.cpf.UnconnectedDataItemRequest;
 import com.digitalpetri.enip.cpf.UnconnectedDataItemResponse;
-import com.google.common.collect.Lists;
-import com.google.common.collect.Maps;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.Timeout;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 public class CipClient extends EtherNetIpClient implements CipServiceInvoker {
 
     private final Logger logger = LoggerFactory.getLogger(getClass());
 
     private final ConnectedDataHandler connectedDataHandler = new ConnectedDataHandler();
-    private final List<CpfItemHandler> additionalHandlers = Lists.newCopyOnWriteArrayList();
+    private final List<CpfItemHandler> additionalHandlers = new CopyOnWriteArrayList<>();
 
-    private final Map<Integer, CompletableFuture<ByteBuf>> pending = Maps.newConcurrentMap();
-    private final Map<Integer, Timeout> timeouts = Maps.newConcurrentMap();
+    private final Map<Integer, CompletableFuture<ByteBuf>> pending = new ConcurrentHashMap<>();
+    private final Map<Integer, Timeout> timeouts = new ConcurrentHashMap<>();
 
     private final AtomicInteger sequenceNumber = new AtomicInteger(0);
 
@@ -129,8 +131,14 @@ public class CipClient extends EtherNetIpClient implements CipServiceInvoker {
                         boolean requestTimedOut = Arrays.stream(e.getAdditionalStatus()).anyMatch(i -> i == 0x0204);
 
                         if (requestTimedOut && count < maxRetries) {
-                            logger.debug("Unconnected request timed out; " +
-                                "retrying, count={}, max={}", count, maxRetries);
+                            getConfig().getLoggingContext().forEach(MDC::put);
+                            try {
+                                logger.debug("Unconnected request timed out; " +
+                                    "retrying, count={}, max={}", count, maxRetries);
+                            } finally {
+                                getConfig().getLoggingContext().keySet().forEach(MDC::remove);
+                            }
+
                             invoke(service, future, count + 1, maxRetries);
                         } else {
                             future.completeExceptionally(e);
@@ -172,9 +180,11 @@ public class CipClient extends EtherNetIpClient implements CipServiceInvoker {
             if (tt.isCancelled()) return;
             CompletableFuture<ByteBuf> f = pending.remove(sequenceNumber);
             if (f != null) {
-                String message = String.format("sequenceNumber=%s timed out waiting %sms for response",
-                    sequenceNumber, getConfig().getTimeout().toMillis());
-                f.completeExceptionally(new Exception(message));
+                String message = String.format(
+                    "sequenceNumber=%s timed out waiting %sms for response",
+                    sequenceNumber, getConfig().getTimeout().toMillis()
+                );
+                f.completeExceptionally(new TimeoutException(message));
             }
         }, getConfig().getTimeout().toMillis(), TimeUnit.MILLISECONDS);
 
